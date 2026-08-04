@@ -63,6 +63,8 @@ Task definitions for running the production dbt project object (`tasty_bytes_pro
    - `SNOWFLAKE_ACCOUNT` — your Snowflake account identifier.
    - `SNOWFLAKE_DATABASE` — `TASTY_BYTES_DBT_DB`.
    - `SNOWFLAKE_SCHEMA` — `PUBLIC`, where the schema-level dbt project objects and production tasks are managed.
+   - `SNOWFLAKE_ROLE` — `ACCOUNTADMIN` for this tutorial; replace it with least-privilege stage roles later.
+   - `SNOWFLAKE_WAREHOUSE` — `TASTY_BYTES_DBT_WH`.
 6. Create a [workspace in Snowsight](https://docs.snowflake.com/en/user-guide/ui-snowsight/workspaces) connected to your fork and run `dbt deps`, then `dbt build` locally.
 
 The tutorial setup grants `ACCOUNTADMIN` to the three service users for simplicity. Replace that with dedicated least-privilege CI, integration, and production roles before using this pattern for production workloads.
