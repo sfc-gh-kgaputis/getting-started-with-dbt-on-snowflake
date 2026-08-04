@@ -5,7 +5,10 @@
 
 -- =============================================================================
 -- STEP 1: Set up your environment
--- Create dev and prod databases and schemas
+-- Create the shared integration (dev), optional CI fallback, and prod schemas.
+-- Personal development uses DBT_DEV_<USER>. Pull request CI uses
+-- DBT_CI_PR_<NUMBER> when materialization is enabled; those schemas are created
+-- by dbt and dropped automatically when the pull request closes.
 -- Choose one of the following three options:
 --
 -- NOTE: If you have already run tasty_bytes_setup.sql, your database and schemas
@@ -13,10 +16,11 @@
 -- https://docs.snowflake.com/en/user-guide/tutorials/dbt-projects-on-snowflake-getting-started-tutorial#run-the-sql-commands-in-tasty-bytes-setup-sql-to-set-up-source-data
 -- =============================================================================
 
--- Option 1: Create an empty database with dev and prod schemas
+-- Option 1: Create an empty database with shared environment schemas
 -- This is the simplest approach when you're starting from scratch.
 CREATE DATABASE IF NOT EXISTS tasty_bytes_dbt_db;
 CREATE SCHEMA IF NOT EXISTS tasty_bytes_dbt_db.dev;
+CREATE SCHEMA IF NOT EXISTS tasty_bytes_dbt_db.ci;
 CREATE SCHEMA IF NOT EXISTS tasty_bytes_dbt_db.prod;
 
 -- Option 2: Clone your production database
@@ -34,12 +38,47 @@ CREATE SCHEMA IF NOT EXISTS tasty_bytes_dbt_db.prod;
 -- CREATE SCHEMA IF NOT EXISTS tasty_bytes_dbt_db.prod CLONE other_tasty_bytes_dbt_db.prod;
 
 -- =============================================================================
--- STEP 2: Create a GitHub service user in Snowflake (recommended)
+-- STEP 2: Create GitHub Actions service users in Snowflake
+-- Three users, one per GitHub Actions OIDC context.
+-- Snowflake matches the SUBJECT claim exactly — the subject differs by context
+-- (pull_request event, branch push, GitHub environment), so separate users are
+-- required. Replace <org>/<repo> with your own before running.
 -- =============================================================================
 
--- Recommended: OIDC-based service user
--- This approach uses OpenID Connect (OIDC) rather than long-lived credentials.
-CREATE USER IF NOT EXISTS github_actions_service_user
+-- CI service user (used by incoming_pr.yml)
+-- Subject is issued for pull_request events — no GitHub environment is required.
+CREATE USER IF NOT EXISTS github_actions_ci_user
+  TYPE = SERVICE
+  WORKLOAD_IDENTITY = (
+    TYPE = OIDC
+    ISSUER = 'https://token.actions.githubusercontent.com',
+    SUBJECT = 'repo:your_repo_org/your_dbt_repo:pull_request'
+  )
+  DEFAULT_ROLE = ACCOUNTADMIN
+  COMMENT = 'Service user for GitHub Actions CI (PR validation)';
+
+GRANT ROLE ACCOUNTADMIN TO USER github_actions_ci_user;
+ALTER USER github_actions_ci_user SET DEFAULT_WAREHOUSE = 'tasty_bytes_dbt_wh';
+
+-- Integration service user (used by pr_merged.yml)
+-- Subject is issued for push-to-main events — no GitHub environment is required.
+CREATE USER IF NOT EXISTS github_actions_integration_user
+  TYPE = SERVICE
+  WORKLOAD_IDENTITY = (
+    TYPE = OIDC
+    ISSUER = 'https://token.actions.githubusercontent.com',
+    SUBJECT = 'repo:your_repo_org/your_dbt_repo:ref:refs/heads/main'
+  )
+  DEFAULT_ROLE = ACCOUNTADMIN
+  COMMENT = 'Service user for GitHub Actions integration deployments (merge to main)';
+
+GRANT ROLE ACCOUNTADMIN TO USER github_actions_integration_user;
+ALTER USER github_actions_integration_user SET DEFAULT_WAREHOUSE = 'tasty_bytes_dbt_wh';
+
+-- Production service user (used by promote_prod.yml — environment: prod)
+-- Subject is issued when a workflow runs inside the GitHub environment named "prod".
+-- The "prod" GitHub environment must be configured with required reviewers.
+CREATE USER IF NOT EXISTS github_actions_prod_user
   TYPE = SERVICE
   WORKLOAD_IDENTITY = (
     TYPE = OIDC
@@ -47,15 +86,10 @@ CREATE USER IF NOT EXISTS github_actions_service_user
     SUBJECT = 'repo:your_repo_org/your_dbt_repo:environment:prod'
   )
   DEFAULT_ROLE = ACCOUNTADMIN
-  COMMENT = 'Service user for GitHub Actions';
+  COMMENT = 'Service user for GitHub Actions production promotions (manual, gated)';
 
--- After you create your user, explicitly grant the default role for the service user
--- to assume that role. The DEFAULT_ROLE parameter only sets the user's default role
--- and doesn't grant it.
-GRANT ROLE ACCOUNTADMIN TO USER github_actions_service_user;
-
--- Set a default warehouse:
-ALTER USER github_actions_service_user SET DEFAULT_WAREHOUSE = 'tasty_bytes_dbt_wh';
+GRANT ROLE ACCOUNTADMIN TO USER github_actions_prod_user;
+ALTER USER github_actions_prod_user SET DEFAULT_WAREHOUSE = 'tasty_bytes_dbt_wh';
 
 -- Alternative: PAT-based authentication (less secure)
 -- If you prefer to use one Snowflake user across multiple repositories, or cannot use
@@ -90,23 +124,30 @@ ALTER USER github_actions_service_user SET DEFAULT_WAREHOUSE = 'tasty_bytes_dbt_
 
 -- =============================================================================
 -- STEP 3: (Optional) Set up a network policy for GitHub Actions
+-- Apply the same policy to all three service users.
 -- =============================================================================
 
--- Option 1: Create a new network policy and apply it to the user
+-- Option 1: Create a new network policy and apply it to all CI/CD users
 -- A Snowflake user can have only one network policy at a time. If the user doesn't
 -- have one or you want to replace the existing policy, complete the following steps:
-CREATE NETWORK POLICY github_actions_policy
-  ALLOWED_NETWORK_RULE_LIST = ('SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL', <other required rules>)
-  BLOCKED_NETWORK_RULE_LIST = ();
+-- CREATE NETWORK POLICY github_actions_policy
+--   ALLOWED_NETWORK_RULE_LIST = ('SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL')
+--   BLOCKED_NETWORK_RULE_LIST = ();
 
-ALTER USER GitHub_Actions_Service_User
-  SET NETWORK_POLICY = github_actions_policy;
+-- ALTER USER github_actions_ci_user
+--   SET NETWORK_POLICY = github_actions_policy;
+--
+-- ALTER USER github_actions_integration_user
+--   SET NETWORK_POLICY = github_actions_policy;
+--
+-- ALTER USER github_actions_prod_user
+--   SET NETWORK_POLICY = github_actions_policy;
 
 -- Option 2: Add a network rule to an existing network policy
--- If the user already has a network policy, you can add the GitHub Actions rule to it.
+-- If the users already have a network policy, you can add the GitHub Actions rule to it.
 
 -- Check the user's current network policy:
--- SHOW PARAMETERS LIKE 'NETWORK_POLICY' FOR USER github_actions_service_user;
+-- SHOW PARAMETERS LIKE 'NETWORK_POLICY' FOR USER github_actions_ci_user;
 
 -- Add the new rule:
 -- ALTER NETWORK POLICY <name>

@@ -1,0 +1,73 @@
+name: Production Promotion
+run-name: Production promotion of ${{ inputs.sha }} by ${{ github.actor }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: >
+          Git SHA or ref to promote to production.
+          Must be the exact commit already validated in the integration
+          environment (i.e. was previously deployed by the integration workflow).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  run-production-promotion:
+    name: "Prod: deploy and build — ${{ inputs.sha }}"
+    runs-on: ubuntu-latest
+    # environment: prod gates this job behind GitHub required reviewers and
+    # produces the OIDC subject:
+    #   repo:<org>/<repo>:environment:prod
+    # which maps to the github_actions_prod_user in Snowflake.
+    environment: prod
+    env:
+      SNOWFLAKE_CLI_FEATURES_ENABLE_DBT: true
+      SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
+
+    steps:
+      - name: Check out the approved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+
+      - name: Install Snowflake CLI
+        uses: snowflakedb/snowflake-actions@v2
+        with:
+          use-oidc: true
+          cli-version: "3.23.0"
+
+      - name: Check Snowflake CLI version
+        run: snow --version
+
+      # Verify the OIDC token resolves to the expected service user
+      - name: Test Snowflake connection
+        run: snow connection test -x
+
+      # Deploy the stable production dbt project object from the approved commit.
+      # --force creates or updates the object if it already exists.
+      - name: Deploy production dbt project object
+        run: |
+          snow dbt deploy tasty_bytes_prod_dbt_project \
+            --source ./tasty_bytes_dbt_demo \
+            --default-target prod \
+            --default-env prod \
+            --dbt-version 1.10.15 \
+            --force -x
+
+      - name: List dbt project objects
+        run: snow dbt list -x
+
+      # Build all models and run all tests using the prod target.
+      # Prod target materializes into TASTY_BYTES_DBT_DB.PROD.
+      - name: Build and test dbt project (prod target)
+        run: snow dbt execute -x tasty_bytes_prod_dbt_project build --target prod
+
+      # Apply production schedules (Snowflake Tasks) from source control.
+      - name: Apply production schedules
+        run: snow sql -f ${{ github.workspace }}/tasty_bytes_dbt_demo/schedules.sql -x

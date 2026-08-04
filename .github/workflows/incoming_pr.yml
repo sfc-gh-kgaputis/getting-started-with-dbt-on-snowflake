@@ -1,51 +1,99 @@
-name: Incoming PR
-run-name: PR opened by ${{ github.actor }}
+name: PR Validation
+run-name: PR validation for ${{ github.actor }} — ${{ github.event.pull_request.title }}
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, closed]
     branches: [main]
+
+# Serialize updates and cleanup for the same PR while allowing different PRs to run concurrently.
+concurrency:
+  group: ci-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  run-snowflake-test-dbt-job:
-    name: "Run on Incoming PR"
+  run-ci-validation:
+    if: github.event.action != 'closed'
+    name: "CI: compile PR #${{ github.event.pull_request.number }}"
     runs-on: ubuntu-latest
-    environment: prod # Must match the OIDC subject's environment
+    # No environment: declaration — the OIDC subject for pull_request events is:
+    #   repo:<org>/<repo>:pull_request
+    # which matches the github_actions_ci_user WORKLOAD_IDENTITY SUBJECT in Snowflake.
     env:
       SNOWFLAKE_CLI_FEATURES_ENABLE_DBT: true
-      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-      # SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PAT }} # Snowflake password is required if you aren't using OIDC
+      SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE }}
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
+      CI_PROJECT_NAME: tasty_bytes_dbt_ci_pr_${{ github.event.pull_request.number }}
+      CI_SCHEMA: DBT_CI_PR_${{ github.event.pull_request.number }}
 
     steps:
-      # Check out repository code
-      # Gets the latest code from the incoming pull request
       - name: Check out repository code
         uses: actions/checkout@v4
 
       - name: Install Snowflake CLI
-        uses: snowflakedb/snowflake-cli-action@v2.0
-        with: # Ensures Snowflake CLI will search for OIDC users matching this subject
+        uses: snowflakedb/snowflake-actions@v2
+        with:
           use-oidc: true
+          cli-version: "3.23.0"
 
-      - name: Check Snowflake CLI Version
+      - name: Check Snowflake CLI version
         run: snow --version
 
-      # The -x is shorthand for --temporary-connection
-      - run: snow connection test -x
+      # Verify the OIDC token resolves to the expected service user
+      - name: Test Snowflake connection
+        run: snow connection test -x
 
-      # The --force setting creates the object or updates it if it already exists
-      # You can remove the "--source" flag if your dbt_project.yml is at root of your repo
-      - name: Create a new tester dbt project object in ${{ vars.SNOWFLAKE_DATABASE }}.${{ vars.SNOWFLAKE_SCHEMA }}
-        run: snow dbt deploy tester_tasty_bytes_dbt_project_object_gh_action --source ./tasty_bytes --dbt-version 1.10.15 --force -x
+      # Each PR gets its own project object so multiple PR validations can run concurrently.
+      - name: Deploy PR-specific CI dbt project object
+        run: |
+          snow dbt deploy "${CI_PROJECT_NAME}" \
+            --source ./tasty_bytes_dbt_demo \
+            --default-target ci \
+            --default-env ci \
+            --dbt-version 1.10.15 \
+            --force -x
 
-      - name: List all of the snowflake dbt project objects in your account
+      - name: List dbt project objects
         run: snow dbt list -x
 
-      # Builds all models and runs tests in DAG order, failing early if any upstream test breaks
-      - name: Build and test dbt project in ${{ vars.SNOWFLAKE_DATABASE }}.${{ vars.SNOWFLAKE_SCHEMA }}
-        run: snow dbt execute -x tester_tasty_bytes_dbt_project_object_gh_action build --target dev
+      # Compile validates parsing, Jinja, refs, and generated SQL without materializing models.
+      # The schema override makes this workflow ready for a future switch from compile to build.
+      - name: Compile dbt project (CI target)
+        run: |
+          snow dbt execute -x \
+            --env ci \
+            --env-vars "{\"DBT_SCHEMA\":\"${CI_SCHEMA}\"}" \
+            "${CI_PROJECT_NAME}" compile --target ci
+
+  cleanup-ci-environment:
+    if: github.event.action == 'closed'
+    name: "CI: clean up PR #${{ github.event.pull_request.number }}"
+    runs-on: ubuntu-latest
+    env:
+      SNOWFLAKE_CLI_FEATURES_ENABLE_DBT: true
+      SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
+      CI_PROJECT_NAME: tasty_bytes_dbt_ci_pr_${{ github.event.pull_request.number }}
+      CI_SCHEMA: DBT_CI_PR_${{ github.event.pull_request.number }}
+
+    steps:
+      - name: Install Snowflake CLI
+        uses: snowflakedb/snowflake-actions@v2
+        with:
+          use-oidc: true
+          cli-version: "3.23.0"
+
+      - name: Test Snowflake connection
+        run: snow connection test -x
+
+      - name: Drop PR-specific dbt project object
+        run: snow dbt drop -x --if-exists "${CI_PROJECT_NAME}"
+
+      # Compile-only CI does not create this schema, but cleanup is ready for future build runs.
+      - name: Drop PR-specific CI schema
+        run: snow sql -q "DROP SCHEMA IF EXISTS ${SNOWFLAKE_DATABASE}.${CI_SCHEMA} CASCADE" -x
