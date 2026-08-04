@@ -55,7 +55,7 @@ jobs:
       # --force creates or updates the object if it already exists.
       - name: Deploy production dbt project object
         run: |
-          snow dbt deploy tasty_bytes_prod_dbt_project \
+          snow dbt deploy tasty_bytes_dbt_prod \
             --source ./tasty_bytes_dbt_demo \
             --default-target prod \
             --default-env prod \
@@ -68,7 +68,7 @@ jobs:
       # Build all models and run all tests using the prod target.
       # Prod target materializes into TASTY_BYTES_DBT_DB.PROD.
       - name: Build and test dbt project (prod target)
-        run: snow dbt execute -x tasty_bytes_prod_dbt_project build --target prod
+        run: snow dbt execute -x tasty_bytes_dbt_prod build --target prod
 
       # Apply production schedules (Snowflake Tasks) from source control.
       - name: Apply production schedules

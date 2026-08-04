@@ -51,7 +51,7 @@ The shared integration environment intentionally uses `TASTY_BYTES_DBT_DB.DEV`. 
 
 ### Scheduling (`schedules.sql`)
 
-Task definitions for running the production dbt project object (`tasty_bytes_prod_dbt_project`) on a schedule using Snowflake Tasks. Applied automatically by `promote_prod.yml`.
+Task definitions for running the production dbt project object (`tasty_bytes_dbt_prod`) on a schedule using Snowflake Tasks. Applied automatically by `promote_prod.yml`.
 
 ## Quick Start
 
